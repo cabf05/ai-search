@@ -59,6 +59,17 @@ HTML_TEMPLATE = '''
             <button type="submit">Buscar</button>
         </form>
         
+        <h3>Ou envie um arquivo para análise</h3>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit">Enviar</button>
+        </form>
+        
+        {% if result %}
+        <h3>Resumo do Arquivo</h3>
+        <p>{{ result }}</p>
+        {% endif %}
+        
         {% if results %}
         <h3>Resultados:</h3>
         <ul>
@@ -108,6 +119,18 @@ def process_file(content, filename):
     except Exception as e:
         print(f"Erro ao processar {filename}: {str(e)}")
         return ""
+
+def generate_summary(text, config):
+    # Use o OpenAI ou outro provedor de IA para gerar um resumo do texto
+    if config["ai_provider"] == "openai":
+        client = OpenAI(api_key=config["api_key"])
+        response = client.Completion.create(
+            engine="text-davinci-003",
+            prompt="Resuma o seguinte texto:\n\n" + text,
+            max_tokens=150
+        )
+        return response.choices[0].text.strip()
+    return "Resumo não gerado. Provedor de IA desconhecido."
 
 # Rotas
 @app.route("/")
@@ -174,6 +197,25 @@ def callback_google():
     config["token"] = flow.credentials.token
     save_config(config)
     return redirect("/")
+
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    if "file" not in request.files:
+        return "Nenhum arquivo enviado.", 400
+    
+    file = request.files["file"]
+    if file.filename == "":
+        return "Nenhum arquivo selecionado.", 400
+    
+    # Processar o arquivo
+    content = file.read()
+    text = process_file(content, file.filename)
+    
+    # Gerar um resumo usando a IA
+    config = load_config()
+    summary = generate_summary(text, config)
+    
+    return render_template_string(HTML_TEMPLATE, result=summary)
 
 @app.route("/search")
 def search():
