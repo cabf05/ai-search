@@ -8,3 +8,5 @@ python-docx
 scikit-learn
 uvicorn
 gunicorn
+google-auth-oauthlib
+python-dotenv
