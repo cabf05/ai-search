@@ -36,15 +36,16 @@ HTML_TEMPLATE = '''
     <div class="section">
         <h2>Escolha suas configurações</h2>
         <form method="post" action="/configure">
-            <h3>Serviço de Armazenamento</h3>
+            <h3>Fonte de Documentos</h3>
             <label><input type="radio" name="cloud_service" value="onedrive" required> OneDrive</label>
             <label><input type="radio" name="cloud_service" value="googledrive" required> Google Drive</label>
+            <label><input type="radio" name="cloud_service" value="local" required> Arquivo Local</label>
 
             <h3>Provedor de IA</h3>
             <label><input type="radio" name="ai_provider" value="openai" required> OpenAI</label>
             <label><input type="radio" name="ai_provider" value="huggingface" required> Hugging Face</label>
 
-            <h3>Chaves de API</h3>
+            <h3>Chave de API</h3>
             <input type="password" name="api_key" placeholder="Chave API (OpenAI ou Hugging Face)" required>
 
             <button type="submit">Salvar Configuração</button>
@@ -53,22 +54,24 @@ HTML_TEMPLATE = '''
 
     {% else %}
     <div class="section">
+        {% if session.cloud_service == "local" %}
+        <h2>Envie um Arquivo para Análise</h2>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit">Enviar</button>
+        </form>
+
+        {% if result %}
+        <h3>Resumo do Arquivo</h3>
+        <p>{{ result }}</p>
+        {% endif %}
+        
+        {% else %}
         <h2>Busca Inteligente</h2>
         <form action="/search" method="get">
             <input type="text" name="query" placeholder="Pesquisar documentos..." style="width: 300px;">
             <button type="submit">Buscar</button>
         </form>
-        
-        <h3>Ou envie um arquivo para análise</h3>
-        <form action="/upload" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" required>
-            <button type="submit">Enviar</button>
-        </form>
-        
-        {% if result %}
-        <h3>Resumo do Arquivo</h3>
-        <p>{{ result }}</p>
-        {% endif %}
         
         {% if results %}
         <h3>Resultados:</h3>
@@ -79,6 +82,7 @@ HTML_TEMPLATE = '''
             </li>
             {% endfor %}
         </ul>
+        {% endif %}
         {% endif %}
     </div>
     {% endif %}
@@ -98,15 +102,6 @@ def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
 
-def get_onedrive_client():
-    return PublicClientApplication(
-        client_id="d17e5e3d-cc13-4059-8eb7-ff1d4b4a8c6b",
-        authority="https://login.microsoftonline.com/common"
-    )
-
-def get_google_drive_service(token):
-    return build("drive", "v3", credentials=token)
-
 def process_file(content, filename):
     try:
         if filename.endswith('.pdf'):
@@ -121,7 +116,6 @@ def process_file(content, filename):
         return ""
 
 def generate_summary(text, config):
-    # Use o OpenAI ou outro provedor de IA para gerar um resumo do texto
     if config["ai_provider"] == "openai":
         client = OpenAI(api_key=config["api_key"])
         response = client.Completion.create(
@@ -136,8 +130,9 @@ def generate_summary(text, config):
 @app.route("/")
 def home():
     config = load_config()
-    session["configured"] = bool(config.get("api_key") and config.get("token"))
-    return render_template_string(HTML_TEMPLATE, results=request.args.get("results"))
+    session["configured"] = bool(config.get("api_key"))
+    session["cloud_service"] = config.get("cloud_service")
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route("/configure", methods=["POST"])
 def configure():
@@ -147,55 +142,9 @@ def configure():
     config["api_key"] = request.form.get("api_key")
     save_config(config)
 
-    if config["cloud_service"] == "onedrive":
-        return redirect("/connect_onedrive")
-    elif config["cloud_service"] == "googledrive":
-        return redirect("/connect_google")
+    if config["cloud_service"] in ["onedrive", "googledrive"]:
+        return redirect(f"/connect_{config['cloud_service']}")
 
-    return redirect("/")
-
-@app.route("/connect_onedrive")
-def connect_onedrive():
-    msal = get_onedrive_client()
-    auth_url = msal.get_authorization_request_url(
-        scopes=["Files.Read.All"],
-        redirect_uri=request.url_root + "callback_onedrive"
-    )
-    return redirect(auth_url)
-
-@app.route("/callback_onedrive")
-def callback_onedrive():
-    msal = get_onedrive_client()
-    result = msal.acquire_token_by_authorization_code(
-        code=request.args["code"],
-        scopes=["Files.Read.All"],
-        redirect_uri=request.url_root + "callback_onedrive"
-    )
-    config = load_config()
-    config["token"] = result.get("access_token")
-    save_config(config)
-    return redirect("/")
-
-@app.route("/connect_google")
-def connect_google():
-    flow = Flow.from_client_secrets_file(
-        "client_secret.json",
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        redirect_uri=request.url_root + "callback_google"
-    )
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    session["google_flow"] = flow
-    return redirect(auth_url)
-
-@app.route("/callback_google")
-def callback_google():
-    flow = session.pop("google_flow", None)
-    if not flow:
-        return "Erro na autenticação", 400
-    flow.fetch_token(code=request.args["code"])
-    config = load_config()
-    config["token"] = flow.credentials.token
-    save_config(config)
     return redirect("/")
 
 @app.route("/upload", methods=["POST"])
@@ -207,47 +156,13 @@ def upload_file():
     if file.filename == "":
         return "Nenhum arquivo selecionado.", 400
     
-    # Processar o arquivo
     content = file.read()
     text = process_file(content, file.filename)
     
-    # Gerar um resumo usando a IA
     config = load_config()
     summary = generate_summary(text, config)
     
     return render_template_string(HTML_TEMPLATE, result=summary)
-
-@app.route("/search")
-def search():
-    config = load_config()
-    documents = []
-
-    if config["cloud_service"] == "onedrive":
-        headers = {"Authorization": f"Bearer {config['token']}"}
-        files = requests.get(
-            "https://graph.microsoft.com/v1.0/me/drive/root/search(q='')",
-            headers=headers
-        ).json().get("value", [])
-
-    elif config["cloud_service"] == "googledrive":
-        service = get_google_drive_service(config["token"])
-        results = service.files().list(q="mimeType='application/pdf' or mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document'").execute()
-        files = results.get("files", [])
-
-    for file in files[:50]:
-        content = requests.get(file["@microsoft.graph.downloadUrl"]).content
-        text = process_file(content, file["name"])
-        documents.append({"name": file["name"], "content": text})
-
-    query = request.args.get("query")
-
-    if config["ai_provider"] == "openai":
-        client = OpenAI(api_key=config["api_key"])
-        embeddings = client.embeddings.create(input=[doc["content"] for doc in documents] + [query], model="text-embedding-3-small")
-    else:
-        embeddings = []  # Implementar Hugging Face
-
-    return render_template_string(HTML_TEMPLATE, results=documents[:5])
 
 if __name__ == "__main__":
     app.run()
