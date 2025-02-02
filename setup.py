@@ -18,7 +18,7 @@ Session(app)
 
 CONFIG_FILE = "config.json"
 
-# Template HTML atualizado
+# Template HTML atualizado com opção de upload
 HTML_TEMPLATE = '''
 <!doctype html>
 <html>
@@ -26,7 +26,7 @@ HTML_TEMPLATE = '''
     <title>Configuração</title>
     <style>
         body { max-width: 800px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; }
-        .section { margin: 20px 0; padding: 20px; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; }
     </style>
 </head>
 <body>
@@ -35,23 +35,30 @@ HTML_TEMPLATE = '''
     {% if not session.configured %}
     <div class="section">
         <h2>Escolha suas configurações</h2>
-        <form method="post" action="/configure" enctype="multipart/form-data">
+        <form method="post" action="/configure">
             <h3>Serviço de Armazenamento</h3>
             <label><input type="radio" name="cloud_service" value="onedrive" required> OneDrive</label>
             <label><input type="radio" name="cloud_service" value="googledrive" required> Google Drive</label>
-            <label><input type="radio" name="cloud_service" value="upload" required> Anexar Arquivo</label>
+            <label><input type="radio" name="cloud_service" value="upload" required> Upload de Arquivo</label>
 
             <h3>Provedor de IA</h3>
             <label><input type="radio" name="ai_provider" value="openai" required> OpenAI</label>
             <label><input type="radio" name="ai_provider" value="huggingface" required> Hugging Face</label>
 
-            <h3>Chave de API</h3>
+            <h3>Chaves de API</h3>
             <input type="password" name="api_key" placeholder="Chave API (OpenAI ou Hugging Face)" required>
 
-            <h3>Anexar Arquivo (se escolhido)</h3>
-            <input type="file" name="file">
-
             <button type="submit">Salvar Configuração</button>
+        </form>
+    </div>
+
+    {% else %}
+    {% if session.cloud_service == 'upload' %}
+    <div class="section">
+        <h2>Fazer Upload de Arquivo</h2>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit">Enviar</button>
         </form>
     </div>
     {% else %}
@@ -63,6 +70,15 @@ HTML_TEMPLATE = '''
         </form>
     </div>
     {% endif %}
+
+    {% if summary %}
+    <div class="section">
+        <h2>Resumo do Arquivo</h2>
+        <p>{{ summary }}</p>
+    </div>
+    {% endif %}
+    
+    {% endif %}
 </body>
 </html>
 '''
@@ -73,26 +89,17 @@ def load_config():
         with open(CONFIG_FILE) as f:
             return json.load(f)
     except:
-        return {"cloud_service": "", "ai_provider": "", "api_key": "", "token": "", "file_content": ""}
+        return {"cloud_service": "", "ai_provider": "", "api_key": "", "token": ""}
 
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)
 
-def get_onedrive_client():
-    return PublicClientApplication(
-        client_id="d17e5e3d-cc13-4059-8eb7-ff1d4b4a8c6b",
-        authority="https://login.microsoftonline.com/common"
-    )
-
-def get_google_drive_service(token):
-    return build("drive", "v3", credentials=token)
-
 def process_file(content, filename):
     try:
         if filename.endswith('.pdf'):
             reader = PdfReader(BytesIO(content))
-            return " ".join([page.extract_text() for page in reader.pages])
+            return " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
         elif filename.endswith('.docx'):
             doc = Document(BytesIO(content))
             return " ".join([para.text for para in doc.paragraphs])
@@ -101,28 +108,26 @@ def process_file(content, filename):
         print(f"Erro ao processar {filename}: {str(e)}")
         return ""
 
-def generate_summary(text, config):
-    if config["ai_provider"] == "openai":
-        client = OpenAI(api_key=config["api_key"])
-        response = client.Completion.create(
-            engine="text-davinci-003",
-            prompt="Resuma o seguinte texto:\n\n" + text,
-            max_tokens=150
+def generate_summary(text, ai_provider, api_key):
+    if ai_provider == "openai":
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "system", "content": "Resuma o seguinte texto:"},
+                      {"role": "user", "content": text}]
         )
-        return response.choices[0].text.strip()
-
-    elif config["ai_provider"] == "huggingface":
-        API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
-        headers = {"Authorization": f"Bearer {config['api_key']}"}
-
-        payload = {"inputs": text, "parameters": {"max_length": 150, "min_length": 50, "do_sample": False}}
-        response = requests.post(API_URL, headers=headers, json=payload)
-
+        return response.choices[0].message.content.strip()
+    
+    elif ai_provider == "huggingface":
+        headers = {"Authorization": f"Bearer {api_key}"}
+        data = {"inputs": text}
+        response = requests.post("https://api-inference.huggingface.co/models/facebook/bart-large-cnn", headers=headers, json=data)
+        
         if response.status_code == 200:
             return response.json()[0]["summary_text"]
         else:
-            return f"Erro na API do Hugging Face: {response.json()}"
-
+            return "Erro ao gerar resumo com Hugging Face"
+    
     return "Resumo não gerado. Provedor de IA desconhecido."
 
 # Rotas
@@ -130,58 +135,38 @@ def generate_summary(text, config):
 def home():
     config = load_config()
     session["configured"] = bool(config.get("api_key"))
+    session["cloud_service"] = config.get("cloud_service", "")
     return render_template_string(HTML_TEMPLATE)
 
 @app.route("/configure", methods=["POST"])
 def configure():
-    config = load_config()
-    config["cloud_service"] = request.form.get("cloud_service")
-    config["ai_provider"] = request.form.get("ai_provider")
-    config["api_key"] = request.form.get("api_key")
-
-    if config["cloud_service"] == "upload" and "file" in request.files:
-        file = request.files["file"]
-        if file.filename:
-            config["file_content"] = process_file(file.read(), file.filename)
-
-    save_config(config)
-
-    if config["cloud_service"] == "onedrive":
-        return redirect("/connect_onedrive")
-    elif config["cloud_service"] == "googledrive":
-        return redirect("/connect_google")
-
-    return redirect("/")
-
-@app.route("/connect_google")
-def connect_google():
-    flow = Flow.from_client_secrets_file(
-        "client_secret.json",
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        redirect_uri=request.url_root + "callback_google"
-    )
-    auth_url, _ = flow.authorization_url(prompt="consent")
-    session["google_flow"] = flow
-    return redirect(auth_url)
-
-@app.route("/callback_google")
-def callback_google():
-    flow = session.pop("google_flow", None)
-    if not flow:
-        return "Erro na autenticação", 400
-    flow.fetch_token(code=request.args["code"])
-    config = load_config()
-    config["token"] = flow.credentials.token
+    config = {
+        "cloud_service": request.form.get("cloud_service"),
+        "ai_provider": request.form.get("ai_provider"),
+        "api_key": request.form.get("api_key")
+    }
     save_config(config)
     return redirect("/")
 
-@app.route("/summary")
-def summary():
+@app.route("/upload", methods=["POST"])
+def upload():
     config = load_config()
-    if config["cloud_service"] == "upload" and config["file_content"]:
-        summary = generate_summary(config["file_content"], config)
-        return f"<h1>Resumo:</h1><p>{summary}</p>"
-    return "<h1>Nenhum arquivo anexado</h1>"
+    if "file" not in request.files:
+        return redirect("/")
+    
+    file = request.files["file"]
+    if file.filename == "":
+        return redirect("/")
+    
+    content = file.read()
+    text = process_file(content, file.filename)
+    
+    if text:
+        summary = generate_summary(text, config["ai_provider"], config["api_key"])
+    else:
+        summary = "Erro ao processar o arquivo."
+
+    return render_template_string(HTML_TEMPLATE, summary=summary)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
