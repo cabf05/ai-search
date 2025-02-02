@@ -11,3 +11,5 @@ gunicorn
 google-auth-oauthlib
 python-dotenv
 google-api-python-client
+transformers 
+requests
